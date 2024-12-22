@@ -1,0 +1,166 @@
+import os
+import json
+import re
+from typing import Dict, List, Optional
+from dataclasses import dataclass, asdict
+from pathlib import Path
+import ast
+import typescript_parser
+
+@dataclass
+class ComponentProperty:
+    name: str
+    type: str
+    decorator: str  # @Input or @Output
+    description: Optional[str] = None
+
+@dataclass
+class ComponentMethod:
+    name: str
+    parameters: List[str]
+    return_type: Optional[str]
+    description: Optional[str] = None
+
+@dataclass
+class Component:
+    name: str
+    file_path: str
+    selector: str
+    template_url: Optional[str]
+    style_urls: List[str]
+    inputs: List[ComponentProperty]
+    outputs: List[ComponentProperty]
+    methods: List[ComponentMethod]
+    dependencies: List[str]
+
+class AngularDocGenerator:
+    def _init_(self, project_path: str):
+        self.project_path = Path(project_path)
+        self.components: List[Component] = []
+        
+    def analyze_project(self):
+        """Analyze the entire Angular project."""
+        typescript_files = self.project_path.rglob("*.ts")
+        for file_path in typescript_files:
+            if self._is_component_file(file_path):
+                component = self._analyze_component_file(file_path)
+                if component:
+                    self.components.append(component)
+    
+    def _is_component_file(self, file_path: Path) -> bool:
+        """Check if file is an Angular component."""
+        content = file_path.read_text()
+        return "@Component" in content and ".component.ts" in str(file_path)
+    
+    def _analyze_component_file(self, file_path: Path) -> Optional[Component]:
+        """Extract component information from a TypeScript file."""
+        content = file_path.read_text()
+        
+        # Extract component decorator information
+        component_info = self._extract_component_decorator(content)
+        if not component_info:
+            return None
+        
+        # Extract class name and methods
+        class_info = self._extract_class_info(content)
+        
+        return Component(
+            name=class_info['name'],
+            file_path=str(file_path),
+            selector=component_info.get('selector', ''),
+            template_url=component_info.get('templateUrl'),
+            style_urls=component_info.get('styleUrls', []),
+            inputs=self._extract_properties(content, '@Input'),
+            outputs=self._extract_properties(content, '@Output'),
+            methods=class_info['methods'],
+            dependencies=self._extract_dependencies(content)
+        )
+    
+    def _extract_component_decorator(self, content: str) -> Dict:
+        """Extract information from @Component decorator."""
+        decorator_pattern = r'@Component\(({[^}]+})\)'
+        match = re.search(decorator_pattern, content, re.MULTILINE | re.DOTALL)
+        if not match:
+            return {}
+            
+        # Simple parser for the decorator object
+        decorator_text = match.group(1)
+        # Note: This is a simplified parser and might need enhancement
+        selector_match = re.search(r"selector:\s*'([^']+)'", decorator_text)
+        template_url_match = re.search(r"templateUrl:\s*'([^']+)'", decorator_text)
+        style_urls_match = re.search(r"styleUrls:\s*\[(.*?)\]", decorator_text)
+        
+        return {
+            'selector': selector_match.group(1) if selector_match else '',
+            'templateUrl': template_url_match.group(1) if template_url_match else None,
+            'styleUrls': [url.strip().strip("'") for url in style_urls_match.group(1).split(',')] 
+                        if style_urls_match else []
+        }
+    
+    def generate_markdown(self, output_dir: str):
+        """Generate markdown documentation."""
+        output_path = Path(output_dir)
+        output_path.mkdir(exist_ok=True)
+        
+        # Generate index.md
+        with open(output_path / 'index.md', 'w') as f:
+            f.write('# Angular Components Documentation\n\n')
+            for component in self.components:
+                f.write(f'- [{component.name}](./{component.name}.md)\n')
+        
+        # Generate individual component docs
+        for component in self.components:
+            self._generate_component_markdown(component, output_path)
+    
+    def _generate_component_markdown(self, component: Component, output_dir: Path):
+        """Generate markdown documentation for a single component."""
+        with open(output_dir / f'{component.name}.md', 'w') as f:
+            f.write(f'# {component.name}\n\n')
+            f.write(f'*Selector:* {component.selector}\n\n')
+            
+            if component.inputs:
+                f.write('## Inputs\n\n')
+                for input_prop in component.inputs:
+                    f.write(f'- {input_prop.name}: {input_prop.type}')
+                    if input_prop.description:
+                        f.write(f' - {input_prop.description}')
+                    f.write('\n')
+                f.write('\n')
+            
+            if component.methods:
+                f.write('## Methods\n\n')
+                for method in component.methods:
+                    params = ', '.join(method.parameters)
+                    f.write(f'### {method.name}({params})')
+                    if method.return_type:
+                        f.write(f' → {method.return_type}')
+                    f.write('\n\n')
+                    if method.description:
+                        f.write(f'{method.description}\n\n')
+    
+    def generate_json(self, output_file: str):
+        """Generate JSON documentation."""
+        with open(output_file, 'w') as f:
+            json.dump([asdict(component) for component in self.components], 
+                     f, indent=2)
+    
+    def generate_graph(self, output_file: str):
+        """Generate a Mermaid graph of component dependencies."""
+        graph_content = ['graph TD;']
+        
+        for component in self.components:
+            component_id = component.name.replace('Component', '')
+            for dep in component.dependencies:
+                dep_id = dep.replace('Component', '')
+                graph_content.append(f'    {component_id}-->{dep_id};')
+        
+        with open(output_file, 'w') as f:
+            f.write('\n'.join(graph_content))
+
+if _name_ == '_main_':
+    # Example usage
+    generator = AngularDocGenerator('./src/app')
+    generator.analyze_project()
+    generator.generate_markdown('./docs')
+    generator.generate_json('./docs/components.json')
+    generator.generate_graph('./docs/component-graph.mmd')
